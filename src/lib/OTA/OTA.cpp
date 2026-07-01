@@ -82,13 +82,6 @@ void MurmurResetCounter()
     murmur_replay_init(&murmur_replay_state);
 }
 
-void ICACHE_RAM_ATTR MurmurTrackNonce()
-{
-    if (!murmur_key_ready)
-        return;
-    (void)MurmurGetCounter();
-}
-
 void MurmurSyncNonce()
 {
     murmur_prev_nonce = OtaNonce;

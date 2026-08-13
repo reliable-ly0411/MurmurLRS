@@ -1,0 +1,44 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "20 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-master
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge upstream master
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out mirror
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Merge upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/PotatoSpudowski/MurmurLRS.git
+          git fetch --prune --no-tags upstream master
+
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "Mirror master is already up to date."
+            exit 0
+          fi
+
+          git merge --no-ff -m "Sync upstream MurmurLRS master" upstream/master
+          git push origin HEAD:master

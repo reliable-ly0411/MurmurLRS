@@ -201,6 +201,8 @@ void OtaSetFullResNextChannelSet(bool next);
 #if defined(TARGET_RX) || defined(UNIT_TEST)
 typedef bool (*UnpackChannelData_t)(OTA_Packet_s const * const otaPktPtr, uint32_t *channelData);
 extern UnpackChannelData_t OtaUnpackChannelData;
+void OtaResetChannelDataComplete();
+bool OtaIsChannelDataComplete(uint32_t const *channelData);
 #endif
 
 void OtaPackAirportData(OTA_Packet_s * const otaPktPtr, FIFO<AP_MAX_BUF_LEN> *inputBuffer);
@@ -208,6 +210,20 @@ void OtaUnpackAirportData(OTA_Packet_s const * const otaPktPtr, FIFO<AP_MAX_BUF_
 
 #if defined(DEBUG_RCVR_LINKSTATS)
 extern uint32_t debugRcvrLinkstatsPacketId;
+#endif
+
+#if defined(MURMUR_ENCRYPT)
+#include "MurmurLink.h"
+#define PACKET_TYPE_SESSION 0b11
+void MurmurInit(bool is_tx, MurmurSession::Random random = MurmurRandom, void *context = nullptr);
+void MurmurGetEncKey(uint8_t out[16]);
+void MurmurResetCounter();
+void MurmurSyncNonce();
+void MurmurTrackNonce();
+void MurmurPoll(uint32_t now);
+bool MurmurSessionReady();
+bool MurmurHasAuthenticatedData();
+bool MurmurPrepareSessionPacket(OTA_Packet_s *packet);
 #endif
 
 #endif // H_OTA

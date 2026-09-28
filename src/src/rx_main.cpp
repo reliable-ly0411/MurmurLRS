@@ -214,6 +214,11 @@ uint8_t getLq()
     return LQCalc.getLQ();
 }
 
+bool getGpsTelemetry(gps_telemetry_t &out)
+{
+    return SerialGPS::getTelemetryInfo(out);
+}
+
 static inline void checkGeminiMode()
 {
     if (isDualRadio())
@@ -314,7 +319,7 @@ void SetRFLinkRate(uint8_t index, bool bindMode) // Set speed of RF link
 
     hwTimer::updateInterval(interval);
 
-#if defined(RADIO_LR1121)
+#if defined(RADIO_LR1121) || defined(RADIO_LR2021)
     FHSSusePrimaryFreqBand = !RadioBandMod::isB2G4(ModParams->radio_type);
     FHSSuseDualBand = RadioBandMod::isBDUAL(ModParams->radio_type);
 #endif
@@ -323,18 +328,24 @@ void SetRFLinkRate(uint8_t index, bool bindMode) // Set speed of RF link
                  ModParams->PreambleLen, invertIQ, ModParams->PayloadLength
 #if defined(RADIO_SX128X)
                  , OtaGetUidSeed(), OtaCrcInitializer, ModParams->radio_type
-#endif
-#if defined(RADIO_LR1121)
+#elif defined(RADIO_LR1121)
                  , ModParams->radio_type, (uint8_t)UID[5], (uint8_t)UID[4]
+#elif defined(RADIO_LR2021)
+                 , ModParams->radio_type, (uint8_t)UID[5], (uint8_t)UID[4]
+                 , OtaGetUidSeed(), OtaCrcInitializer
 #endif
                  );
 
-#if defined(RADIO_LR1121)
+#if defined(RADIO_LR1121) || defined(RADIO_LR2021)
     if (FHSSuseDualBand)
     {
         Radio.Config(ModParams->bw2, ModParams->sf2, ModParams->cr2, FHSSgetInitialGeminiFreq(),
                     ModParams->PreambleLen2, invertIQ, ModParams->PayloadLength,
-                    ModParams->radio_type, (uint8_t)UID[5], (uint8_t)UID[4], SX12XX_Radio_2);
+                    ModParams->radio_type, (uint8_t)UID[5], (uint8_t)UID[4],
+#if defined(RADIO_LR2021)
+                    OtaGetUidSeed(), OtaCrcInitializer,
+#endif
+                    SX12XX_Radio_2);
     }
 #endif
 
@@ -474,6 +485,13 @@ bool ICACHE_RAM_ATTR HandleSendDataDl()
         tlmQueued = DataDlSender.IsActive();
     }
 
+#if defined(MURMUR_ENCRYPT)
+    if (MurmurPrepareSessionPacket(&otaPkt))
+    {
+        // Session packets use one common envelope on both radios.
+    }
+    else
+#endif
     if (NextTelemetryType == PACKET_TYPE_LINKSTATS || !tlmQueued)
     {
         otaPkt.std.type = PACKET_TYPE_LINKSTATS;
@@ -526,11 +544,13 @@ bool ICACHE_RAM_ATTR HandleSendDataDl()
     }
 
     SX12XX_Radio_Number_t transmittingRadio;
+#if !defined(MURMUR_ENCRYPT)
     if (config.GetForceTlmOff())
     {
         transmittingRadio = SX12XX_Radio_NONE;
     }
     else
+#endif
     {
         transmittingRadio = LbtChannelIsClear(SX12XX_Radio_All);   // weed out the radio(s) if channel in use
         if (isDualRadio() && !geminiMode && transmittingRadio == SX12XX_Radio_All) // If the receiver is in diversity mode, only send TLM on a single radio.
@@ -744,6 +764,10 @@ static void ICACHE_RAM_ATTR updateDiversity()
             antenna = config.GetAntennaMode();
         }
     }
+    if (GPIO_PIN_ANT_GROUP != UNDEF_PIN)
+    {
+        digitalWrite(GPIO_PIN_ANT_GROUP, config.GetAntennaGroup());
+    }
 }
 
 void ICACHE_RAM_ATTR HWtimerCallbackTock()
@@ -815,6 +839,7 @@ void LostConnection(bool resumeRx)
     LPF_Offset.init(0);
     LPF_OffsetDx.init(0);
     alreadyTLMresp = false;
+    OtaResetChannelDataComplete();
 
     if (!InBindingMode)
     {
@@ -837,6 +862,8 @@ void ICACHE_RAM_ATTR TentativeConnection(unsigned long now)
     PFDloop.reset();
     setConnectionState(tentative);
     connectionHasModelMatch = false;
+    ChannelDataReset();
+    OtaResetChannelDataComplete();
     RXtimerState = tim_disconnected;
     DBGLN("tentative conn");
     PfdPrevRawOffset = 0;
@@ -889,8 +916,10 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_RC(OTA_Packet_s const * const otaPkt
     bool telemetryConfirmValue = OtaUnpackChannelData(otaPktPtr, ChannelData);
     DataDlSender.ConfirmCurrentPayload(telemetryConfirmValue);
 
+    bool const channelDataComplete = OtaIsChannelDataComplete(ChannelData);
+
     // No channels packets to the FC or PWM pins if no model match
-    if (connectionHasModelMatch)
+    if (connectionHasModelMatch && channelDataComplete)
     {
         if (ExpressLRS_currAirRate_Modparams->numOfSends == 1)
         {
@@ -1141,7 +1170,11 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
     doStartTimer = false;
     unsigned long now = millis();
 
-    LastValidPacket = now;
+#if defined(MURMUR_ENCRYPT)
+    // CRC-only SYNC/fragments cannot postpone control-link failsafe.
+    if (otaPktPtr->std.type == PACKET_TYPE_RCDATA || otaPktPtr->std.type == PACKET_TYPE_DATA)
+#endif
+        LastValidPacket = now;
 
     Radio.CheckForSecondPacket();
     if (Radio.hasSecondRadioGotData)
@@ -1390,7 +1423,9 @@ static void setupSerial()
     }
     else if (config.GetSerialProtocol() == PROTOCOL_GPS)
     {
-        serialIO = new SerialGPS(SERIAL_PROTOCOL_TX, SERIAL_PROTOCOL_RX);
+        // Serial(0) is always assigned in a way that it uses two pins, only Serial1 is allowed to not have both RX/TX
+        const int8_t gpsTxPin = (GPIO_PIN_RCSIGNAL_TX == UNDEF_PIN) ? U0TXD_GPIO_NUM : GPIO_PIN_RCSIGNAL_TX;
+        serialIO = new SerialGPS(SERIAL_PROTOCOL_RX, gpsTxPin);
     }
     else if (hottTlmSerial)
     {
@@ -1493,8 +1528,13 @@ static void setupSerial1()
             serial1IO = new SerialDisplayport(SERIAL1_PROTOCOL_TX, SERIAL1_PROTOCOL_RX);
             break;
         case PROTOCOL_SERIAL1_GPS:
-            Serial1.begin(115200, SERIAL_8N1, serial1RXpin, serial1TXpin, false);
-            serial1IO = new SerialGPS(SERIAL1_PROTOCOL_TX, SERIAL1_PROTOCOL_RX);
+            // Without an RX pin there is nothing to listen to, and without a TX pin (or with it
+            // shared with RX) the GPS can be read but not configured
+            if (serial1RXpin != UNDEF_PIN)
+            {
+                Serial1.begin(115200, SERIAL_8N1, serial1RXpin, serial1TXpin, false);
+                serial1IO = new SerialGPS(SERIAL1_PROTOCOL_TX, serial1TXpin == serial1RXpin ? UNDEF_PIN : serial1TXpin);
+            }
             break;
     }
 }
@@ -1556,6 +1596,11 @@ static void setupTarget()
         pinMode(GPIO_PIN_ANT_CTRL, OUTPUT);
         digitalWrite(GPIO_PIN_ANT_CTRL, LOW);
     }
+    if (GPIO_PIN_ANT_GROUP != UNDEF_PIN)
+    {
+        pinMode(GPIO_PIN_ANT_GROUP, OUTPUT);
+        digitalWrite(GPIO_PIN_ANT_GROUP, LOW);
+    }
 
     setupTargetCommon();
 }
@@ -1582,8 +1627,14 @@ static void setupRadio()
     Radio.currFreq = FHSSgetInitialFreq();
 #if defined(RADIO_SX127X)
     //Radio.currSyncWord = UID[3];
-#endif
+    bool init_success = Radio.Begin();
+#elif defined(RADIO_SX128X)
+    bool init_success = Radio.Begin();
+#elif defined(RADIO_LR1121)
     bool init_success = Radio.Begin(FHSSgetMinimumFreq(), FHSSgetMaximumFreq());
+#elif defined(RADIO_LR2021)
+    bool init_success = Radio.Begin(FHSSconfig->freq_center, FHSSconfigDualBand->freq_center);
+#endif
     POWERMGNT::init();
     if (!init_success)
     {
@@ -1736,7 +1787,7 @@ static void ExitBindingMode()
 
 static void updateBindingMode(unsigned long now)
 {
-#if defined(RADIO_LR1121)
+#if defined(RADIO_LR1121) || defined(RADIO_LR2021)
     static uint32_t BindingRateChangeMs;
     constexpr uint32_t BindingRateChangeCyclePeriodMs = 125U;
 #endif
@@ -1747,7 +1798,7 @@ static void updateBindingMode(unsigned long now)
         ExitBindingMode();
     }
 
-#if defined(RADIO_LR1121)
+#if defined(RADIO_LR1121) || defined(RADIO_LR2021)
     // Change frequency domains every 500ms.  This will allow single LR1121 receivers to receive bind packets from SX12XX Tx modules.
     else if (InBindingMode && (now - BindingRateChangeMs) > BindingRateChangeCyclePeriodMs)
     {
@@ -1939,6 +1990,8 @@ static void updateSwitchMode()
         return;
 
     OtaUpdateSerializers((OtaSwitchMode_e)(SwitchModePending - 1), ExpressLRS_currAirRate_Modparams->PayloadLength);
+    ChannelDataReset();
+    OtaResetChannelDataComplete();
     SwitchModePending = 0;
 }
 
@@ -1988,6 +2041,9 @@ void resetConfigAndReboot()
 
 void setup()
 {
+#if defined(MURMUR_ENCRYPT)
+    MurmurEntropyInit();
+#endif
     if (!options_init())
     {
         // In the failure case we set the logging to the null logger so nothing crashes
@@ -2051,9 +2107,8 @@ void setup()
 
         setupBindingFromConfig();
 #if defined(MURMUR_ENCRYPT)
-        extern void MurmurInitFromUid(const uint8_t uid[6], bool is_tx);
         extern void MurmurGetEncKey(uint8_t out[16]);
-        MurmurInitFromUid(UID, false);
+        MurmurInit(false);
         { uint8_t ek[16]; MurmurGetEncKey(ek); FHSSrandomiseFHSSsequenceSecure(ek); }
         DBGLN("MurmurLRS: encryption + FHSSv2 active (RX)");
 #else
@@ -2090,6 +2145,9 @@ void loop()
 #endif
 {
     unsigned long now = millis();
+#if defined(MURMUR_ENCRYPT)
+    MurmurPoll(now);
+#endif
 
     if (DataUlReceiver.HasFinishedData())
     {
@@ -2137,7 +2195,12 @@ void loop()
         LostConnection(true);
     }
 
-    if ((connectionState == tentative) && (abs(LPF_OffsetDx.value()) <= 10) && (LPF_Offset.value() < 100) && (LQCalc.getLQRaw() > minLqForChaos())) //detects when we are connected
+    if (
+#if defined(MURMUR_ENCRYPT)
+        MurmurHasAuthenticatedData() &&
+        (now - LastValidPacket <= ExpressLRS_currAirRate_RFperfParams->DisconnectTimeoutMs) &&
+#endif
+        (connectionState == tentative) && (abs(LPF_OffsetDx.value()) <= 10) && (LPF_Offset.value() < 100) && (LQCalc.getLQRaw() > minLqForChaos())) //detects when we are connected
     {
         GotConnection(now);
     }

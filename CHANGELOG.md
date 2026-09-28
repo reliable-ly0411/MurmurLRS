@@ -2,6 +2,26 @@
 
 All notable changes to MurmurLRS are documented here.
 
+## Unreleased
+
+- Integrated the HMAC-SHA-256/HKDF session protocol into TX/RX, with boot-seeded challenges, directional traffic keys, bounded ISR mailboxes, and retry/reboot recovery. Application traffic waits for confirmation; hardware validation remains separate from host tests and build checks.
+- Preserve replay history across rate/connection changes, separate outgoing counters from receive synchronization, and stop traffic before counter exhaustion.
+- Require bidirectional telemetry in encrypted mode and add recovery-adapter and production OTA integration tests.
+
+- Derive firmware encryption keys from the complete build-time phrase rather than the six-byte ELRS UID. Both endpoints must be rebuilt; older encrypted firmware is incompatible.
+- Require a nonempty phrase for encrypted builds and keep generated key material out of compiler flags and build logs.
+- Track TX counter wraps on timer ticks, including periods with no transmitted packets.
+- Advance the TX epoch on rate/binding resets to avoid reusing counters within a running session. Session keys now change on authenticated boot/recovery handshakes, subject to fresh hardware entropy.
+- Reject repeated acquisition evidence and retain replay protection for acquisition packets through lock and relock.
+- Continue bounded acquisition searches beyond epoch 255 so late joins can find long-running transmitters.
+- Add CI tests against the production encrypted OTA hooks and build-time key provisioning.
+
+- Fixed the duplicate `MurmurTrackNonce` definition that prevented encrypted firmware builds (#17).
+- Restored ESP8285 TX EEPROM initialization and separate backpack/USB UARTs on classic ESP32.
+- Added a dedicated CI workflow for crypto tests and six explicitly encrypted firmware builds.
+- Added experimental non-PA LilyGO T3-S3 LR1121 TX/RX bench targets, a checked-in 2.4 GHz hardware profile, and an optional TX free-run mode.
+- Documented the ExpressLRS 4.1.0-derived upstream base (#18), actual UID-based key derivation, short authentication tags, and session/nonce limitations.
+
 ## v0.8 (2026-05-17)
 
 ### Fix: link dies after 5 minutes at 500Hz

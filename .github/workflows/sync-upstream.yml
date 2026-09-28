@@ -1,8 +1,10 @@
 name: Sync upstream
 
 on:
+  # 每周一北京时间 12:20 运行；GitHub cron 使用 UTC。
   schedule:
     - cron: "20 4 * * 1"
+  # 保留 Actions 页面中的手动同步入口。
   workflow_dispatch:
 
 permissions:
@@ -40,5 +42,8 @@ jobs:
             exit 0
           fi
 
-          git merge --no-ff -m "Sync upstream MurmurLRS master" upstream/master
+          # GITHUB_TOKEN 不能更新工作流文件；先合并代码，再恢复镜像自己的工作流目录。
+          git merge --no-ff --no-commit upstream/master
+          git restore --source=HEAD --staged --worktree -- .github/workflows
+          git commit -m "Sync upstream MurmurLRS master"
           git push origin HEAD:master

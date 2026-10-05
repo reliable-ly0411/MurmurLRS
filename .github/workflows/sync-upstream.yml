@@ -42,8 +42,33 @@ jobs:
             exit 0
           fi
 
-          # GITHUB_TOKEN 不能更新工作流文件；先合并代码，再恢复镜像自己的工作流目录。
-          git merge --no-ff --no-commit upstream/master
+          # 合并失败时仅处理工作流冲突；代码冲突或其他错误保留日志并停止。
+          if ! git merge --no-ff --no-commit upstream/master; then
+            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+            if (( ${#conflicts[@]} == 0 )); then
+              echo "::error::Upstream merge failed without file conflicts."
+              exit 1
+            fi
+
+            for path in "${conflicts[@]}"; do
+              if [[ "$path" != .github/workflows/* ]]; then
+                echo "::error::Manual resolution required: $path"
+                exit 1
+              fi
+            done
+
+            # 保留本仓库的工作流策略，包括此前有意排除的上游工作流。
+            for path in "${conflicts[@]}"; do
+              if git cat-file -e "HEAD:$path" 2>/dev/null; then
+                git checkout --ours -- "$path"
+                git add -- "$path"
+              else
+                git rm -- "$path"
+              fi
+            done
+          fi
+
+          # GITHUB_TOKEN 不能更新工作流文件；统一恢复本仓库的工作流目录。
           git restore --source=HEAD --staged --worktree -- .github/workflows
           git commit -m "Sync upstream MurmurLRS master"
           git push origin HEAD:master

@@ -1,7 +1,25 @@
-name: Build ExpressLRS
-on: [push, pull_request]
+name: Build MurmurLRS firmware
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  # 同步使用 GITHUB_TOKEN 推送，改用完成事件触发默认分支最新代码的构建。
+  workflow_run:
+    workflows: ["Sync upstream"]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-firmware-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-validate-artifacts:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -43,6 +61,7 @@ jobs:
           fi
 
   test:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
 
@@ -92,8 +111,9 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
+    # 加密专用目标由 murmur.yml 提供测试口令构建，避免混入普通固件包。
     - id: set-targets
-      run: echo "targets=[$( (grep '\[env:.*UART\]' src/targets/*.ini ; grep -r '\[env:.*STLINK\]' src/targets/) | sed 's/.*://' | sed s/.$// | egrep "(STLINK|UART)" | grep -v DEPRECATED | tr '\n' ','  | sed 's/,$/"\n/' | sed 's/,/","/'g | sed 's/^/"/')]" >> $GITHUB_OUTPUT
+      run: echo "targets=[$( (grep '\[env:.*UART\]' src/targets/*.ini ; grep -r '\[env:.*STLINK\]' src/targets/) | sed 's/.*://' | sed s/.$// | egrep "(STLINK|UART)" | grep -v DEPRECATED | grep -v '^Murmur_' | tr '\n' ','  | sed 's/,$/"\n/' | sed 's/,/","/'g | sed 's/^/"/')]" >> $GITHUB_OUTPUT
 
   build:
     needs: targets
@@ -254,6 +274,8 @@ jobs:
           version: "2.22.35"
 
       - name: Upload firmware bundle to ExpressLRS artifactory
+        # 镜像构建产物保存在 Actions；外部官方仓库只由官方项目上传。
+        if: github.repository == 'ExpressLRS/ExpressLRS'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

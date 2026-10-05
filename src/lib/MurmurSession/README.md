@@ -148,6 +148,40 @@ these checks are not entropy certification. No UID, timestamp, RSSI, or test RNG
 is used as firmware entropy. Freshness across boots depends on the SDK entropy
 source operating correctly on the target hardware.
 
+## Wi-Fi management
+
+An encrypted image contains the pair's master key. Its `/firmware.bin` export is
+therefore disabled, including for authenticated administrators. Obtain recovery
+backups through the wired device interface and keep them private.
+
+Wi-Fi management is disabled by default. To enable it, set `MURMUR_WIFI_PASSWORD`
+in the build environment to a separately generated 128-bit random value encoded
+as 32 hexadecimal characters. For example, generate it locally with
+`python3 -c 'import secrets; print(secrets.token_hex(16))'`, store it privately,
+and supply it through the environment. Do not reuse the binding phrase or put
+the credential in compiler flags or user defines. The build writes it into an
+ignored generated header, not logs, options JSON, or compiler command lines.
+The credential is compiled into the firmware; rebuilding changes it, and
+resetting runtime configuration does not clear or replace it.
+
+Connect directly to the device's AP using this credential, then open its local
+IP address (normally `http://10.0.0.1`) and log in as **admin** with the same
+credential. All HTTP routes require authentication before upload/JSON callbacks
+can run. Cross-origin requests and unexpected Host values are rejected; wildcard
+CORS is omitted. Saved home-network credentials are not used in encrypted mode.
+State-changing requests use POST. Command-line clients without browser origin
+headers must also send `X-Murmur-Request: 1`; that marker does not replace
+authentication or bypass origin checks.
+TCP/MSP bridging and UDP joystick services are disabled because they have no
+equivalent authentication. Wired flashing remains available when management is
+unprovisioned or the credential is lost.
+
+This is HTTP Basic authentication over the protected Wi-Fi AP, not HTTPS,
+firmware signing, or protection against physical flash extraction. Anyone given
+the management credential is trusted to change configuration and install firmware.
+Stock builds retain upstream management behavior. Public CI credentials are
+test fixtures, never deployment credentials.
+
 ## On-device validation
 
 Native tests exercise the production OTA wrappers and recovery adapter; firmware
@@ -157,6 +191,32 @@ on the intended hardware. The short data tags, unauthenticated SYNC, denial of
 service exposure, and lack of forward secrecy remain protocol limitations.
 
 ## Tests
+
+For wired link diagnosis, add `-DMURMUR_LINK_DIAGNOSTICS` to an encrypted
+build. The receiver exposes a read-only **Murmur Diagnostics** CRSF info field:
+key availability (`K`), receive epoch lock (`L`), send/receive epochs (`E`),
+accepted/rejected application packets (`OK`/`FAIL`), maximum validation time
+(`MAX`), session key installations (`NEW`), and counter resets (`RESET`).
+Rejected counts include acquisition trials and replays. Counters accumulate
+until reboot; a read's first chunk refreshes its snapshot. No key material or
+channel payload is exported. The timing instrumentation is absent when the
+flag is omitted. Run `native_murmur` with the same flag to include the
+diagnostic authentication/replay regression.
+
+The separate **Murmur Timing** field reports receiver connection state (`S`),
+timer lock state (`T`), current nonce (`N`), hop index (`H`), time since the last
+authenticated application packet (`AGE`), and phase-detector offset/derivative
+(`PFD`). ESP8285 builds also report maximum timer callback lateness (`LATE`).
+These are diagnostic snapshots, not proof that control output is continuous.
+
+`RH` is the FNV-1a fingerprint of the wire bytes of the last rejected application
+packet. It helps correlate a bench transmission with a receiver rejection.
+It is not an authentication tag and does not identify the reason for rejection.
+
+The optional diagnostics also report `SKIP` and `SH` for radio packets ignored
+because their time slot already has accepted data. `SH` fingerprints the original
+wire bytes using the same diagnostic hash as `RH`. These packets do not enter
+authentication, so this count must not be treated as a MAC or replay-window rejection.
 
 From `src/`:
 

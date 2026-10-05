@@ -13,6 +13,7 @@ extern "C" {
 #include "murmur.h"
 }
 extern void MurmurTestSetSendEpoch(uint32_t epoch);
+extern uint8_t MurmurTestDecryptAttempts();
 
 CRSFEndpoint *crsfEndpoint = nullptr;
 uint32_t ChannelData[CRSF_NUM_CHANNELS];
@@ -33,6 +34,7 @@ static void prepare(uint8_t packetSize, bool senderTx = true, uint32_t start = 1
 {
     OtaUpdateSerializers(smWideOr8ch, packetSize);
     payloadSize = (packetSize == OTA4_PACKET_SIZE ? OTA4_CRC_CALC_LEN : OTA8_CRC_CALC_LEN) - 1;
+    OtaNonce = 0;
     initSession(senderTx);
     for (uint32_t counter = 0; counter < start; ++counter) {
         OtaNonce = counter;
@@ -156,7 +158,7 @@ void test_late_join_beyond_epoch_255()
     for (uint8_t size : {OTA4_PACKET_SIZE, OTA8_PACKET_SIZE}) {
         prepare(size, true, 70000);
         bool acquired = false;
-        for (unsigned attempt = 0; attempt < 32 && !acquired; ++attempt) {
+        for (unsigned attempt = 0; attempt < 1024 && !acquired; ++attempt) {
             for (unsigned i = 0; i < 3 && !acquired; ++i)
                 acquired = receive(i, static_cast<uint8_t>(70000 + i));
         }
@@ -182,18 +184,22 @@ void test_rate_reset_reserves_fresh_counters()
             TEST_ASSERT_NOT_EQUAL(0, std::memcmp(&first, &next, size));
             first = next;
         }
-        // RX can acquire packets after the transition, using real OTA hooks.
-        for (unsigned i = 0; i < 3; ++i) {
+        // A two-attempt ISR budget spreads an unknown epoch search across
+        // packets. Use advancing packets rather than reinstalling a sender.
+        std::vector<OTA_Packet_s> afterReset(64);
+        for (unsigned i = 0; i < afterReset.size(); ++i) {
             OtaNonce = i + 1;
-            packets[i] = {};
-            packets[i].std.type = PACKET_TYPE_DATA;
-            OtaGeneratePacketCrc(&packets[i]);
+            afterReset[i].std.type = PACKET_TYPE_DATA;
+            OtaGeneratePacketCrc(&afterReset[i]);
         }
         initSession(false);
-        for (unsigned i = 0; i < 3; ++i) {
+        bool acquired = false;
+        for (unsigned i = 0; i < afterReset.size(); ++i) {
             OtaNonce = i + 1;
-            TEST_ASSERT_EQUAL(i == 2, OtaValidatePacketCrc(&packets[i]));
+            acquired |= OtaValidatePacketCrc(&afterReset[i]);
+            TEST_ASSERT_LESS_OR_EQUAL_UINT8(2, MurmurTestDecryptAttempts());
         }
+        TEST_ASSERT_TRUE(acquired);
     }
 }
 
@@ -412,6 +418,150 @@ void test_sparse_downlink_acquires_across_epochs()
 }
 
 
+// Generate the remote peer's traffic independently, preserving the production
+// receiver's keys, replay history and timer state throughout a transition.
+static OTA_Packet_s peerPacket(uint32_t counter, uint8_t size)
+{
+    const uint8_t up[16] = {1,2,3,4};
+    OTA_Packet_s packet{};
+    packet.std.type = PACKET_TYPE_DATA;
+    const uint8_t length = (size == OTA4_PACKET_SIZE ? OTA4_CRC_CALC_LEN : OTA8_CRC_CALC_LEN) - 1;
+    auto *payload = reinterpret_cast<uint8_t *>(&packet) + 1;
+    memset(payload, 0x5a, length);
+    const uint16_t mac = murmur_encrypt_packet(up, counter, PACKET_TYPE_DATA, 0,
+        payload, length, size == OTA4_PACKET_SIZE ? 14 : 16);
+    if (size == OTA4_PACKET_SIZE) {
+        packet.std.crcHigh = mac >> 8;
+        packet.std.crcLow = mac;
+    } else packet.full.crc = mac;
+    return packet;
+}
+
+static bool receivePeer(uint32_t counter, uint8_t size)
+{
+    OTA_Packet_s packet = peerPacket(counter, size);
+    const bool accepted = OtaValidatePacketCrc(&packet);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(2, MurmurTestDecryptAttempts());
+    if (accepted) {
+        const uint8_t length = (size == OTA4_PACKET_SIZE ? OTA4_CRC_CALC_LEN : OTA8_CRC_CALC_LEN) - 1;
+        for (unsigned i = 1; i <= length; ++i)
+            TEST_ASSERT_EQUAL_UINT8(0x5a, reinterpret_cast<uint8_t *>(&packet)[i]);
+    }
+    return accepted;
+}
+
+void test_rate_recovery_preserves_live_history_with_clock_overshoot()
+{
+    for (uint8_t size : {OTA4_PACKET_SIZE, OTA8_PACKET_SIZE}) {
+        for (unsigned overshoot : {0U, 10U, 50U}) {
+            OtaUpdateSerializers(smWideOr8ch, size);
+            OtaNonce = 0; initSession(false);
+            for (unsigned slot = 0; slot < 1000; ++slot) {
+                OtaNonce = slot; MurmurTrackNonce();
+                TEST_ASSERT_EQUAL(slot >= 2, receivePeer(slot, size));
+            }
+            for (unsigned tick = 1; tick <= overshoot * 256; ++tick) {
+                OtaNonce = 999 + tick; MurmurTrackNonce();
+            }
+            // TX reserves its next epoch; RX keeps its existing replay window.
+            OtaNonce = 0; MurmurSyncNonce(); MurmurResetCounter();
+            unsigned accepted = 0;
+            for (unsigned slot = 1024; slot < 1536; ++slot) {
+                OtaNonce = slot; MurmurTrackNonce();
+                if (receivePeer(slot, size)) ++accepted;
+                if (slot >= 1056) TEST_ASSERT_TRUE(accepted > 0);
+            }
+            TEST_ASSERT_GREATER_THAN_UINT32(480, accepted);
+            // Neither the reset nor acquisition reopens previously accepted data.
+            OtaNonce = static_cast<uint8_t>(999); MurmurSyncNonce();
+            TEST_ASSERT_FALSE(receivePeer(999, size));
+        }
+    }
+}
+
+void test_acquisition_revisits_epochs_after_nonce_phase_recovers()
+{
+    for (uint8_t size : {OTA4_PACKET_SIZE, OTA8_PACKET_SIZE}) {
+        for (uint32_t peerEpoch : {3U, 20U}) {
+            OtaUpdateSerializers(smWideOr8ch, size);
+            OtaNonce = 0; initSession(false);
+            for (unsigned slot = 0; slot < 3; ++slot) {
+                OtaNonce = slot; MurmurTrackNonce(); receivePeer(slot, size);
+            }
+            MurmurResetCounter();
+            const uint32_t start = peerEpoch << 8;
+            // Wrong slot phase prevents matches while the cooperative scanner
+            // moves beyond the actual peer epoch. Keep existing replay history.
+            for (uint32_t counter = start; counter < start + 256; ++counter) {
+                OtaNonce = counter + 2; MurmurTrackNonce();
+                TEST_ASSERT_FALSE(receivePeer(counter, size));
+            }
+            bool acquired = false;
+            for (uint32_t counter = start + 256; counter < start + 1280; ++counter) {
+                OtaNonce = counter; MurmurTrackNonce();
+                acquired |= receivePeer(counter, size);
+            }
+            TEST_ASSERT_TRUE(acquired);
+        }
+    }
+}
+
+void test_learned_nonce_offset_remains_fast_across_wrap()
+{
+    for (uint8_t size : {OTA4_PACKET_SIZE, OTA8_PACKET_SIZE}) {
+        OtaUpdateSerializers(smWideOr8ch, size);
+        OtaNonce = 253; initSession(false);
+        for (unsigned counter = 252; counter < 520; ++counter) {
+            OtaNonce = counter + 1; MurmurTrackNonce();
+            const bool accepted = receivePeer(counter, size);
+            if (counter >= 255) {
+                TEST_ASSERT_TRUE(accepted);
+                TEST_ASSERT_EQUAL_UINT8(1, MurmurTestDecryptAttempts());
+            }
+        }
+        // A later clock correction may remove the one-slot offset.
+        bool recovered = false;
+        for (unsigned counter = 520; counter < 536; ++counter) {
+            OtaNonce = counter; MurmurSyncNonce();
+            recovered |= receivePeer(counter, size);
+        }
+        TEST_ASSERT_TRUE(recovered);
+    }
+}
+
+void test_failed_validation_has_fixed_crypto_budget()
+{
+    for (uint8_t size : {OTA4_PACKET_SIZE, OTA8_PACKET_SIZE}) {
+        OtaUpdateSerializers(smWideOr8ch, size);
+        OtaNonce = 0; initSession(false);
+        for (unsigned slot = 0; slot < 3; ++slot) {
+            OtaNonce = slot; MurmurTrackNonce(); receivePeer(slot, size);
+        }
+        // Exercise both locked fallback and unlocked scanning after failures.
+        for (unsigned slot = 3; slot < 512; ++slot) {
+            OtaNonce = slot; MurmurTrackNonce();
+            auto packet = peerPacket(slot, size);
+            reinterpret_cast<uint8_t *>(&packet)[2] ^= 0x80;
+            TEST_ASSERT_FALSE(OtaValidatePacketCrc(&packet));
+            TEST_ASSERT_LESS_OR_EQUAL_UINT8(2, MurmurTestDecryptAttempts());
+        }
+    }
+}
+
+void test_disconnect_resets_preserve_cooperative_search_progress()
+{
+    OtaUpdateSerializers(smWideOr8ch, OTA4_PACKET_SIZE);
+    OtaNonce = 0; initSession(false);
+    // Remote peer is far ahead. Resets are closer together than a full scan.
+    bool acquired = false;
+    for (unsigned slot = 0; slot < 512 && !acquired; ++slot) {
+        OtaNonce = slot;
+        if (slot % 16 == 0) MurmurResetCounter();
+        acquired = receivePeer((40U << 8) | OtaNonce, OTA4_PACKET_SIZE);
+    }
+    TEST_ASSERT_TRUE(acquired);
+}
+
 void test_cleartext_sync_is_discovery_only()
 {
     for (uint8_t size : {OTA4_PACKET_SIZE,OTA8_PACKET_SIZE}) {
@@ -428,6 +578,46 @@ void test_cleartext_sync_is_discovery_only()
         TEST_ASSERT_FALSE(MurmurHasAuthenticatedData());
     }
 }
+
+#if defined(MURMUR_LINK_DIAGNOSTICS)
+void test_diagnostics_preserve_authentication_and_replay_results()
+{
+    for (uint8_t size : {OTA4_PACKET_SIZE, OTA8_PACKET_SIZE}) {
+        prepare(size);
+        const auto before = MurmurGetDiagnostics();
+        TEST_ASSERT_TRUE(before.keysReady);
+        TEST_ASSERT_FALSE(before.epochLocked);
+        TEST_ASSERT_FALSE(receive(0, 10));
+        TEST_ASSERT_FALSE(receive(1, 11));
+        TEST_ASSERT_TRUE(receive(2, 12));
+        TEST_ASSERT_FALSE(receive(2, 12));
+        const auto after = MurmurGetDiagnostics();
+        TEST_ASSERT_EQUAL_UINT32(before.accepted + 1, after.accepted);
+        TEST_ASSERT_EQUAL_UINT32(before.rejected + 3, after.rejected);
+        uint32_t wireHash = 2166136261U;
+        const auto *wire = reinterpret_cast<const uint8_t *>(&packets[2]);
+        for (unsigned i = 0; i < size; ++i)
+            wireHash = (wireHash ^ wire[i]) * 16777619U;
+        TEST_ASSERT_EQUAL_UINT32(wireHash, after.lastRejectedHash);
+        const OTA_Packet_s unchanged = packets[2];
+        MurmurRecordSlotIgnored(&packets[2]);
+        const auto skipped = MurmurGetDiagnostics();
+        TEST_ASSERT_EQUAL_UINT32(after.slotIgnored + 1, skipped.slotIgnored);
+        TEST_ASSERT_EQUAL_UINT32(wireHash, skipped.lastSlotIgnoredHash);
+        TEST_ASSERT_EQUAL_UINT32(after.accepted, skipped.accepted);
+        TEST_ASSERT_EQUAL_UINT32(after.rejected, skipped.rejected);
+        TEST_ASSERT_EQUAL_MEMORY(&unchanged, &packets[2], size);
+        TEST_ASSERT_EQUAL(after.keysReady, skipped.keysReady);
+        TEST_ASSERT_EQUAL(after.epochLocked, skipped.epochLocked);
+        TEST_ASSERT_TRUE(after.epochLocked);
+        MurmurResetCounter();
+        const auto reset = MurmurGetDiagnostics();
+        TEST_ASSERT_EQUAL_UINT32(after.resets + 1, reset.resets);
+        TEST_ASSERT_TRUE(reset.keysReady);
+        TEST_ASSERT_FALSE(reset.epochLocked);
+    }
+}
+#endif
 
 int main()
 {
@@ -450,5 +640,13 @@ int main()
     RUN_TEST(test_counter_exhaustion_blocks_application_packets);
     RUN_TEST(test_sparse_downlink_acquires_across_epochs);
     RUN_TEST(test_cleartext_sync_is_discovery_only);
+    RUN_TEST(test_rate_recovery_preserves_live_history_with_clock_overshoot);
+    RUN_TEST(test_failed_validation_has_fixed_crypto_budget);
+    RUN_TEST(test_acquisition_revisits_epochs_after_nonce_phase_recovers);
+    RUN_TEST(test_learned_nonce_offset_remains_fast_across_wrap);
+    RUN_TEST(test_disconnect_resets_preserve_cooperative_search_progress);
+#if defined(MURMUR_LINK_DIAGNOSTICS)
+    RUN_TEST(test_diagnostics_preserve_authentication_and_replay_results);
+#endif
     return UNITY_END();
 }

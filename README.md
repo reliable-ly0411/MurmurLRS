@@ -29,12 +29,13 @@ Use the same MurmurLRS revision, binding phrase, and compatible RF settings on b
 - **Cryptographic FHSS (FHSSv2).** ASCON-XOF generates a keyed hop sequence, with rejection sampling and Fisher–Yates shuffling. Its secrecy depends on the encryption key's secrecy.
 - **Replay window.** A 64-packet sliding window checks reconstructed counters and survives connection/rate resets within a session. New sessions install fresh directional keys after an authenticated challenge exchange.
 - **Epoch acquisition.** The RX searches candidate epochs and requires consecutive authentication matches before locking. Acquisition and reboot recovery remain important hardware test cases.
+- **Link diagnostics.** Optional receiver counters expose authentication outcomes, session installations, epoch lock, and packet-validation timing without exporting keys or channel payloads. See the [session protocol and diagnostics](src/lib/MurmurSession/README.md).
 
 ### Roadmap
 
 - **Adaptive TX power** ([#8](https://github.com/PotatoSpudowski/MurmurLRS/issues/8)). Three-priority dynamic power: emergency ramp on LQ drop, RSSI-based stepping, and power decay when the link is healthy. A proposed additional timed decay policy would build on the existing upstream power increases and decreases. This reduces unnecessary RF output and saves battery.
 
-- **Telemetry modes** ([#9](https://github.com/PotatoSpudowski/MurmurLRS/issues/9)). Full (default), minimal (critical alerts only), or silent (uplink-only, zero RX emissions). The existing telemetry ratio already provides an Off setting; priority filtering remains a separate proposal.
+- **Telemetry modes** ([#9](https://github.com/PotatoSpudowski/MurmurLRS/issues/9)). Priority filtering could reduce application telemetry while retaining handshake, recovery, and link-health traffic. Zero-emission RX operation would require a different session protocol; encrypted mode currently requires return traffic.
 
 - **N-band diversity** ([#10](https://github.com/PotatoSpudowski/MurmurLRS/issues/10)). ELRS Gemini supports 2 simultaneous bands. Support for three or more radios/bands is a protocol and hardware proposal, not an implemented mode.
 
@@ -65,7 +66,27 @@ MurmurLRS: encryption enabled
 
 For command-line builds, set `MURMUR_BINDING_PHRASE` in the environment, then run PlatformIO from `src/`. Use `PLATFORMIO_BUILD_FLAGS` for regulatory settings, not the phrase. The generated key header stays in the ignored build directory; compiler flags and build logs do not contain the phrase or key.
 
+### Build a private TX/RX pair
+
+Use [tools/build_pair.py](tools/build_pair.py) to build both endpoints from the same committed revision. It requires explicit PlatformIO targets, matching hardware profiles, and a regulatory domain. Install PlatformIO in `venv/` and obtain the matching [ExpressLRS hardware definitions](https://github.com/ExpressLRS/targets) in `src/hardware/` first. For example, for a RadioMaster TX15 and BETAFPV 2.4 GHz AIO receiver:
+
+```bash
+python3 tools/build_pair.py \
+  --tx-target Unified_ESP32_LR1121_TX_via_ETX \
+  --tx-profile radiomaster.tx_dual.tx15 \
+  --rx-target Unified_ESP8285_2400_RX_via_WIFI \
+  --rx-profile betafpv.rx_2400.aio \
+  --domain ISM_2400 \
+  --output "$HOME/MurmurLRS-private/pair-001"
+```
+
+Supply `MURMUR_BINDING_PHRASE` through your local environment; optionally supply the separate `MURMUR_WIFI_PASSWORD`. Choose a domain permitted in your region and verify the profiles against your actual boards. The command builds in a temporary checkout, ignores local bench/diagnostic options, and never uploads or flashes anything. The private output contains TX/RX binaries, hardware layouts, the matching Lua script, build logs, and a manifest with the source revision and SHA-256 checksums. The manifest is written only after both builds succeed; a failed run may leave partial output for troubleshooting. Existing output directories are never overwritten.
+
+[MurmurLRS v0.9.0](https://github.com/PotatoSpudowski/MurmurLRS/releases/tag/v0.9.0) is a source release; see the [changelog](CHANGELOG.md) for changes and compatibility requirements. CI checks use public fixture credentials and verify compilation; they are not privately provisioned device builds. See [release policy](RELEASING.md) for the distinction between commits, builds, and releases.
+
 **Migration:** rebuild and flash both endpoints. Session-enabled firmware requires the new handshake on both TX and RX; it cannot exchange application packets with earlier MurmurLRS images. The full-phrase key format is incompatible with older UID-derived firmware, even for the same phrase. Changing the phrase in the device's WiFi UI changes ELRS binding settings but does not replace the compiled encryption key; rebuild both endpoints to change that key. Firmware images and build directories contain the key and must be treated as secret.
+
+**Wi-Fi management:** encrypted builds leave Wi-Fi management disabled unless a separate random 32-character hexadecimal `MURMUR_WIFI_PASSWORD` is provisioned in the build environment. When enabled, connect directly to the device's protected AP using that credential, then log in to the web interface as `admin` with the same credential. Home-network mode, firmware download, TCP/MSP bridging, and UDP joystick services are disabled in encrypted builds. Wired updates remain available. See [management access](src/lib/MurmurSession/README.md#wi-fi-management).
 
 ## How it works
 
@@ -105,7 +126,7 @@ make test
 
 The C suite contains 62 tests covering cipher vectors, packet authentication, replay checks, FHSSv2, acquisition, and simulated long-running sessions. The stock native PlatformIO suite contains 147 tests.
 
-`MURMUR_BINDING_PHRASE=ci-only-not-a-secret ../venv/bin/pio test -e native_murmur` (from `src/`) exercises the production encrypted OTA hooks for both packet sizes, replay-resistant acquisition/relock, packet loss, tampering, nonce wrap, rate transitions, and late joins beyond epoch 255. It also tests session negotiation through the OTA hooks, independent reboots, entropy failure, counter exhaustion, and bounded recovery mailboxes. Python provisioning tests run with `python -m unittest discover -s src/python/tests -p test_murmur_key.py` from the repo root.
+`MURMUR_BINDING_PHRASE=ci-only-not-a-secret ../venv/bin/pio test -e native_murmur` (from `src/`) runs 57 tests exercising the production encrypted OTA hooks for both packet sizes, replay-resistant acquisition/relock, packet loss, tampering, nonce wrap, rate transitions, and late joins beyond epoch 255. It also tests session negotiation through the OTA hooks, independent reboots, entropy failure, counter exhaustion, bounded recovery mailboxes, and the Wi-Fi request guard. Adding `PLATFORMIO_BUILD_FLAGS=-DMURMUR_LINK_DIAGNOSTICS` includes the diagnostic regression for 58 tests; both configurations run in CI. The 13 Python provisioning tests run with `python -m unittest discover -s src/python/tests -p test_murmur_key.py` from the repo root.
 
 The [encrypted CI workflow](.github/workflows/murmur.yml) compiles seven firmware targets with `MURMUR_ENCRYPT`, including both LilyGO bench roles; the upstream workflow exercises native tests and stock builds. Simulation does not replace over-the-air testing.
 
@@ -142,7 +163,7 @@ fhss_key -> ASCON-XOF("FHSSv1" || fhss_key || domain_id) -> hop sequence
 
 **Epoch acquisition:**
 
-The RX tries 16 candidate epochs per acquisition call and requires three consecutive matches before locking. The production scan wraps after a bounded range. Cold-start recovery at high TX epochs must be tested against the actual OTA implementation; standalone acquisition simulations are not sufficient evidence.
+Application-packet validation tries at most two counter candidates per call, prioritizing the expected or previously matched counter and continuing the wider search across packets. Acquisition requires three distinct consecutive matches before locking. Authenticated replay history anchors recovery independently of the speculative timer estimate, and disconnect resets preserve search progress. Distant unknown epochs take more packets to discover. Cold-start recovery at high TX epochs must be tested against the actual OTA implementation; standalone acquisition simulations are not sufficient evidence.
 
 </details>
 

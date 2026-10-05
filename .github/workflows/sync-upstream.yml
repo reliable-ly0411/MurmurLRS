@@ -1,6 +1,10 @@
 name: Sync upstream
 
 on:
+  # 临时用于验证本次修复，验证完成后移除。
+  push:
+    branches: [master]
+    paths: [.github/workflows/sync-upstream.yml]
   # 每周一北京时间 12:20 运行；GitHub cron 使用 UTC。
   schedule:
     - cron: "20 4 * * 1"

@@ -1,0 +1,109 @@
+name: Murmur encrypted checks
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  # 同步使用 GITHUB_TOKEN 推送，改用完成事件触发默认分支最新代码的构建。
+  workflow_run:
+    workflows: ["Sync upstream"]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-encrypted-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  crypto:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run all crypto and acquisition tests
+        run: make -C src/lib/MurmurEncrypt test
+
+  ota-integration:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: python -m pip install platformio==6.1.19
+      - name: Test build-time key and Wi-Fi provisioning
+        run: python -m unittest discover -s src/python/tests -p 'test_murmur_key.py'
+      - name: Test private pair packaging
+        run: python -m unittest discover -s tools -p 'test_*.py'
+      - name: Test production OTA hooks and session recovery
+        working-directory: src
+        env:
+          # 仅用于 CI 的公开口令，可替换为其他非空测试字符串；不能用于实际设备。
+          MURMUR_BINDING_PHRASE: ci-only-not-a-secret
+        run: pio test -e native_murmur
+      - name: Test opt-in link diagnostics
+        working-directory: src
+        env:
+          # 仅用于 CI 的公开口令，可替换为其他非空测试字符串；不能用于实际设备。
+          MURMUR_BINDING_PHRASE: ci-only-not-a-secret
+          PLATFORMIO_BUILD_FLAGS: '-DMURMUR_LINK_DIAGNOSTICS'
+        run: pio test -e native_murmur
+      - name: Sanitize session parser, framing, and handshake
+        working-directory: src
+        run: |
+          g++ -std=c++11 -O1 -g -DMURMUR_ENCRYPT -DMURMUR_SESSION_STANDALONE \
+            -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+            -Ilib/MurmurSession -I.pio/libdeps/native_murmur/Unity/src \
+            test/test_murmur_session/test_session.cpp lib/MurmurSession/MurmurSession.cpp \
+            lib/MurmurSession/vendor/SHA256.cpp lib/MurmurSession/vendor/Hash.cpp \
+            lib/MurmurSession/vendor/Crypto.cpp .pio/libdeps/native_murmur/Unity/src/unity.c \
+            -o /tmp/murmur-session-tests
+          /tmp/murmur-session-tests
+          g++ -std=c++11 -O1 -g -DMURMUR_ENCRYPT -DMURMUR_SESSION_STANDALONE -DTARGET_NATIVE \
+            -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+            -Iinclude -Ilib/MurmurLink -Ilib/MurmurSession -I.pio/libdeps/native_murmur/Unity/src \
+            test/test_murmur_link/test_link.cpp lib/MurmurLink/MurmurLink.cpp \
+            lib/MurmurSession/MurmurSession.cpp lib/MurmurSession/vendor/SHA256.cpp \
+            lib/MurmurSession/vendor/Hash.cpp lib/MurmurSession/vendor/Crypto.cpp \
+            .pio/libdeps/native_murmur/Unity/src/unity.c -o /tmp/murmur-link-tests
+          /tmp/murmur-link-tests
+
+  encrypted-firmware:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - Unified_ESP32_2400_TX_via_WIFI
+          - Unified_ESP32_LR2021_TX_via_WIFI
+          - Unified_ESP32_LR1121_RX_via_WIFI
+          - Unified_ESP8285_2400_TX_via_WIFI
+          - Unified_ESP32C3_2400_RX_via_WIFI
+          - Murmur_LilyGO_T3S3_LR1121_TX_via_UART
+          - Murmur_LilyGO_T3S3_LR1121_RX_via_UART
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: python -m pip install platformio==6.1.19
+      - uses: actions/cache@v5
+        with:
+          path: ~/.platformio
+          key: murmur-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src/targets/*.ini') }}
+      - name: Compile the encrypted path
+        working-directory: src
+        env:
+          PLATFORMIO_BUILD_FLAGS: '-DMURMUR_ENCRYPT -DRegulatory_Domain_FCC_915'
+          # 仅用于 CI 的公开口令，可替换为其他非空测试字符串；不能用于实际设备。
+          MURMUR_BINDING_PHRASE: ci-only-not-a-secret
+          MURMUR_BENCH_FREERUN: '1'
+          # 测试 Wi-Fi 密码为 32 字符；这里只验证编译，不上传加密固件。
+          MURMUR_WIFI_PASSWORD: '0123456789abcdef0123456789abcdef'
+        run: pio run -e "${{ matrix.target }}"

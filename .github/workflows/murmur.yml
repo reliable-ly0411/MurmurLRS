@@ -37,6 +37,9 @@ jobs:
       - run: python -m pip install platformio==6.1.19
       - name: Test build-time key and Wi-Fi provisioning
         run: python -m unittest discover -s src/python/tests -p 'test_murmur_key.py'
+      # 发布脚本只作为测试数据使用，不注册发布工作流，也不创建 Release。
+      - name: Prepare source-release test fixture
+        run: cp .github/fixtures/source-release.yml .github/workflows/release.yml
       - name: Test private pair packaging
         run: python -m unittest discover -s tools -p 'test_*.py'
       - name: Test production OTA hooks and session recovery

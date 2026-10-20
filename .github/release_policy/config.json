@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "upstream": "PotatoSpudowski/MurmurLRS",
+  "branch": "master",
+  "bootstrap_at": "2026-10-20T13:55:00Z",
+  "families": {
+    "stable": "^v\\d+\\.\\d+\\.\\d+$"
+  },
+  "max_attempts": 3,
+  "publication": "blocked: no authorized downstream publication route; existing owner, credential and human gates remain required",
+  "baseline": {
+    "402055076": {
+      "tag": "v0.9.0",
+      "upstream_sha": "5d9ecceff719cf096315c90fcfa02c480539b533",
+      "status": "baseline",
+      "published_at": "2026-10-02T18:22:31Z"
+    }
+  },
+  "dependencies": {
+    "targets": {
+      "repository": "ExpressLRS/targets",
+      "ref": "master"
+    }
+  },
+  "heavy_workflows": [
+    "build.yml",
+    "murmur.yml"
+  ],
+  "automatic_workflows": [
+    "build.yml",
+    "murmur.yml"
+  ]
+}

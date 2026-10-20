@@ -1,74 +1,99 @@
 name: Sync upstream
-
 on:
-  # 每周一北京时间 12:20 运行；GitHub cron 使用 UTC。
   schedule:
     - cron: "20 4 * * 1"
-  # 保留 Actions 页面中的手动同步入口。
   workflow_dispatch:
-
+    inputs:
+      action:
+        description: Sync only, or sync and inspect new formal releases
+        type: choice
+        options: [sync, check-releases]
+        default: sync
+      retry_release_id:
+        description: Explicit retry of one failed release ID (no historical backfill)
+        type: string
+        default: ''
 permissions:
-  contents: write
-
+  contents: read
 concurrency:
-  group: sync-upstream-master
+  group: release-policy-master
   cancel-in-progress: false
-
 jobs:
   sync:
-    name: Merge upstream master
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
-
+    outputs:
+      build: ${{ steps.release.outputs.build }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      source_ref: ${{ steps.release.outputs.source_ref }}
+      manifest: ${{ steps.release.outputs.manifest }}
     steps:
-      - name: Check out mirror
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v4
         with:
           ref: master
           fetch-depth: 0
-
-      - name: Merge upstream
+      - name: Merge upstream without replacing local policy
+        env:
+          UPSTREAM: PotatoSpudowski/MurmurLRS
+          TARGET_BRANCH: master
         shell: bash
         run: |
           set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git remote add upstream https://github.com/PotatoSpudowski/MurmurLRS.git
-          git fetch --prune --no-tags upstream master
-
-          if git merge-base --is-ancestor upstream/master HEAD; then
-            echo "Mirror master is already up to date."
-            exit 0
-          fi
-
-          # 合并失败时仅处理工作流冲突；代码冲突或其他错误保留日志并停止。
-          if ! git merge --no-ff --no-commit upstream/master; then
-            mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
-            if (( ${#conflicts[@]} == 0 )); then
-              echo "::error::Upstream merge failed without file conflicts."
-              exit 1
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --no-tags upstream "$TARGET_BRANCH"
+          if ! git merge-base --is-ancestor "upstream/$TARGET_BRANCH" HEAD; then
+            if ! git merge --no-ff --no-commit "upstream/$TARGET_BRANCH"; then
+              mapfile -d '' -t conflicts < <(git diff --name-only --diff-filter=U -z)
+              (( ${#conflicts[@]} > 0 )) || exit 1
+              for path in "${conflicts[@]}"; do
+                case "$path" in
+                  .github/workflows/*|.github/release_policy/*) ;;
+                  *) echo "Manual conflict resolution required: $path"; exit 1 ;;
+                esac
+              done
             fi
-
-            for path in "${conflicts[@]}"; do
-              if [[ "$path" != .github/workflows/* ]]; then
-                echo "::error::Manual resolution required: $path"
-                exit 1
-              fi
-            done
-
-            # 保留本仓库的工作流策略，包括此前有意排除的上游工作流。
-            for path in "${conflicts[@]}"; do
-              if git cat-file -e "HEAD:$path" 2>/dev/null; then
-                git checkout --ours -- "$path"
-                git add -- "$path"
-              else
-                git rm -- "$path"
-              fi
-            done
+            git restore --source=HEAD --staged --worktree -- .github/workflows .github/release_policy
+            git commit -m "CI: sync upstream while retaining downstream workflow policy"
+            git push origin "HEAD:$TARGET_BRANCH"
           fi
-
-          # GITHUB_TOKEN 不能更新工作流文件；统一恢复本仓库的工作流目录。
-          git restore --source=HEAD --staged --worktree -- .github/workflows
-          git commit -m "Sync upstream MurmurLRS master"
-          git push origin HEAD:master
+      - name: Unit-test the lightweight release detector
+        run: python3 -m unittest discover -s .github/release_policy -p 'test_*.py' -v
+      - name: Recognize one new formal release and pin source
+        id: release
+        if: github.event_name == 'schedule' || inputs.action == 'check-releases'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RETRY_ID: ${{ inputs.retry_release_id }}
+        run: python3 .github/release_policy/policy.py prepare --retry-id "$RETRY_ID"
+  build:
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    permissions:
+      contents: read
+      actions: write
+    uses: ./.github/workflows/release-build.yml
+    with:
+      source_ref: ${{ needs.sync.outputs.source_ref }}
+      release_manifest: ${{ needs.sync.outputs.manifest }}
+  finish:
+    needs: [sync, build]
+    if: always() && needs.sync.outputs.build == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Record exact outcome without publishing
+        env:
+          RELEASE_ID: ${{ needs.sync.outputs.release_id }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 .github/release_policy/policy.py finish --release-id "$RELEASE_ID" --result "$BUILD_RESULT"

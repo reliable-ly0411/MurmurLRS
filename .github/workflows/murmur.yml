@@ -1,21 +1,28 @@
 name: Murmur encrypted checks
-on:
-  push:
-    branches: [master]
-  pull_request:
+'on':
   workflow_dispatch:
-  # 同步使用 GITHUB_TOKEN 推送，改用完成事件触发默认分支最新代码的构建。
-  workflow_run:
-    workflows: ["Sync upstream"]
-    types: [completed]
-    branches: [master]
+    inputs:
+      source_ref:
+        description: Explicit manual source ref (blank uses selected workflow ref)
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Explicit manual source ref (blank uses selected workflow ref)
+        type: string
+        default: ''
+      release_manifest:
+        type: string
+        default: ''
+        description: Pinned manifest from the release gate; empty only for explicit manual builds
 
 permissions:
   contents: read
 
 concurrency:
   group: build-encrypted-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   crypto:
@@ -23,6 +30,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Reconstruct and verify pinned release source
+        if: inputs.release_manifest != ''
+        shell: bash
+        env:
+          RELEASE_MANIFEST: ${{ inputs.release_manifest }}
+        run: python3 .github/release_policy/policy.py materialize
+
       - name: Run all crypto and acquisition tests
         run: make -C src/lib/MurmurEncrypt test
 
@@ -31,6 +48,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Reconstruct and verify pinned release source
+        if: inputs.release_manifest != ''
+        shell: bash
+        env:
+          RELEASE_MANIFEST: ${{ inputs.release_manifest }}
+        run: python3 .github/release_policy/policy.py materialize
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
@@ -91,6 +118,16 @@ jobs:
           - Murmur_LilyGO_T3S3_LR1121_RX_via_UART
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Reconstruct and verify pinned release source
+        if: inputs.release_manifest != ''
+        shell: bash
+        env:
+          RELEASE_MANIFEST: ${{ inputs.release_manifest }}
+        run: python3 .github/release_policy/policy.py materialize
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'

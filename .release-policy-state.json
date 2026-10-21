@@ -1,0 +1,11 @@
+{
+  "releases": {
+    "402055076": {
+      "published_at": "2026-10-02T18:22:31Z",
+      "status": "baseline",
+      "tag": "v0.9.0",
+      "upstream_sha": "5d9ecceff719cf096315c90fcfa02c480539b533"
+    }
+  },
+  "schema": 1
+}

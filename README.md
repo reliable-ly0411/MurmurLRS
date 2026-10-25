@@ -17,7 +17,7 @@ MurmurLRS is an open-source radio-link security project that adds Ascon-128 pack
 
 ## Upstream compatibility
 
-The current branch is based on **ExpressLRS 4.1.0 plus subsequent upstream development**, not ExpressLRS 3.x or an unmodified 4.1.0 release. The latest upstream merge incorporates [`46f1f7ad`](https://github.com/ExpressLRS/ExpressLRS/commit/46f1f7ad) through merge `e2f55f26`.
+The current branch is based on **ExpressLRS 4.1.0 plus subsequent upstream development**, not ExpressLRS 3.x or an unmodified 4.1.0 release. The latest upstream sync incorporates [`36c1bf26`](https://github.com/ExpressLRS/ExpressLRS/commit/36c1bf26).
 
 Use the same MurmurLRS revision, binding phrase, and compatible RF settings on both endpoints. Stock ExpressLRS cannot exchange encrypted RC/data packets with MurmurLRS. Use the Lua script shipped in this repository.
 
@@ -124,7 +124,7 @@ cd src/lib/MurmurEncrypt
 make test
 ```
 
-The C suite contains 62 tests covering cipher vectors, packet authentication, replay checks, FHSSv2, acquisition, and simulated long-running sessions. The stock native PlatformIO suite contains 147 tests.
+The C suite contains 62 tests covering cipher vectors, packet authentication, replay checks, FHSSv2, acquisition, and simulated long-running sessions. The stock native PlatformIO suite contains 180 tests.
 
 `MURMUR_BINDING_PHRASE=ci-only-not-a-secret ../venv/bin/pio test -e native_murmur` (from `src/`) runs 57 tests exercising the production encrypted OTA hooks for both packet sizes, replay-resistant acquisition/relock, packet loss, tampering, nonce wrap, rate transitions, and late joins beyond epoch 255. It also tests session negotiation through the OTA hooks, independent reboots, entropy failure, counter exhaustion, bounded recovery mailboxes, and the Wi-Fi request guard. Adding `PLATFORMIO_BUILD_FLAGS=-DMURMUR_LINK_DIAGNOSTICS` includes the diagnostic regression for 58 tests; both configurations run in CI. The 13 Python provisioning tests run with `python -m unittest discover -s src/python/tests -p test_murmur_key.py` from the repo root.
 

@@ -4,6 +4,8 @@ All notable changes to MurmurLRS are documented here.
 
 ## Unreleased
 
+- Sync ExpressLRS master through `36c1bf26`: radio-band binding fixes, CRSF/PWM bounds checks, telemetry updates, ESP8285 memory reductions, and single-band FHSS memory savings. Preserve encrypted Wi-Fi restrictions for the relocated TCP/WebSocket bridge and classic ESP32 UART separation. Regenerate web assets with MurmurLRS management controls.
+
 - Distinguish authentication rejects from extra packets ignored after a time slot already has valid data in optional receiver diagnostics.
 
 ## v0.9.0 (2026-10-02)

@@ -48,7 +48,7 @@ static char pwmModes[] = "50Hz;60Hz;100Hz;160Hz;333Hz;400Hz;10kHzDuty;On/Off;DSh
 static selectionParameter luaSerialProtocol = {
     {"Protocol", CRSF_TEXT_SELECTION},
     0, // value
-    "CRSF;Inverted CRSF;SBUS;Inverted SBUS;SUMD;DJI RS Pro;HoTT Telemetry;MAVLink;DisplayPort;GPS",
+  "CRSF;Inverted CRSF;SBUS;Inverted SBUS;SUMD;DJI RS Pro;HoTT Telemetry;MAVLink;DisplayPort;GPS;Scorpion",
     STR_EMPTYSPACE
 };
 
@@ -56,7 +56,7 @@ static selectionParameter luaSerialProtocol = {
 static selectionParameter luaSerial1Protocol = {
     {"Protocol2", CRSF_TEXT_SELECTION},
     0, // value
-    "Off;CRSF;Inverted CRSF;SBUS;Inverted SBUS;SUMD;DJI RS Pro;HoTT Telemetry;Tramp;SmartAudio;DisplayPort;GPS",
+  "Off;CRSF;Inverted CRSF;SBUS;Inverted SBUS;SUMD;DJI RS Pro;HoTT Telemetry;Tramp;SmartAudio;DisplayPort;GPS;Scorpion",
     STR_EMPTYSPACE
 };
 #endif
@@ -221,6 +221,9 @@ static uint8_t sanitizePwmMode(uint8_t mode)
 
 void RXEndpoint::luaparamMappingChannelOut(propertiesCommon *item, uint8_t arg)
 {
+    // arg is 1-based and indexes GPIO_PIN_PWM_OUTPUTS, which may have fewer than PWM_MAX_CHANNELS entries
+    arg = constrain(arg, 1, GPIO_PIN_PWM_OUTPUTS_COUNT);
+
     bool sclAssigned = false;
     bool sdaAssigned = false;
 #if defined(PLATFORM_ESP32)
